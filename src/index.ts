@@ -2284,22 +2284,36 @@ export default function (pi: ExtensionAPI) {
 	// ACTIVE_STREAM_SIMPLE_KEY so a freshly loaded module can register as first
 	// again.
 
-	const g = globalThis as Record<symbol, any>;
+	const g = globalThis as Record<symbol, unknown>;
+	// The custom-api registry is process-global and keyed by api name alone, so
+	// one stream fn necessarily serves every live session. The pinned first
+	// instance owns it; later instances reuse it rather than clobbering it with
+	// their own empty-state fn.
+	const pinnedStreamSimple = g[ACTIVE_STREAM_SIMPLE_KEY] as typeof streamClaudeAgentSdk | undefined;
 	const providerConfig = {
 		baseUrl: "claude-bridge",
 		apiKey: "not-used",
 		api: "claude-bridge",
 		models: registeredModels,
-		// Cast: pi-ai AssistantMessageEventStream diamond dep between pi-coding-agent and pi-agent-core
-		streamSimple: streamClaudeAgentSdk as any,
+		// Unchecked cast: pi-ai's AssistantMessageEventStream is a diamond dep
+		// between pi-coding-agent and pi-agent-core, so the two declarations are
+		// structurally identical but not unifiable by inference.
+		streamSimple: (pinnedStreamSimple ?? streamClaudeAgentSdk) as unknown as typeof streamClaudeAgentSdk,
 	};
-	if (!g[ACTIVE_STREAM_SIMPLE_KEY]) {
+	if (!pinnedStreamSimple) {
 		// First instance: store our streamSimple and register.
 		g[ACTIVE_STREAM_SIMPLE_KEY] = streamClaudeAgentSdk;
 		pi.registerProvider(PROVIDER_ID, providerConfig);
 	} else {
-		// Later instance: register only if this session's registry lacks the provider.
-		debug(`provider: deferring registration decision to session_start (module=${moduleInstanceId})`);
+		// Later instance. OMP's extension loader calls clearSourceRegistrations()
+		// for this module's path on EVERY load, which deletes the process-global
+		// custom-api entry the already-running parent session routes through — its
+		// next request then falls to the built-in path and fails with "No API key
+		// for provider: claude-bridge" (oh-my-pi#9024). Re-register at load, in the
+		// same tick as the sweep, pointing at the pinned stream fn so the parent's
+		// in-flight query state is preserved.
+		debug(`provider: re-registering swept api with pinned stream fn (module=${moduleInstanceId})`);
+		pi.registerProvider(PROVIDER_ID, providerConfig);
 		pi.on("session_start", (_event, ctx) => {
 			if (ctx.modelRegistry.getProvider(PROVIDER_ID)) {
 				debug(`provider: registry already has ${PROVIDER_ID}, skipping registration (module=${moduleInstanceId})`);

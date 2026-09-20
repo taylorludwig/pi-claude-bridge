@@ -18,6 +18,7 @@ import { verifyWrittenSession as _verifyWrittenSession } from "./session-verify.
 import { extractAllToolResults as _extractAllToolResults, type McpResult } from "./extract-tool-results.js";
 import { QueryContext, ctx } from "./query-state.js";
 import { makePromptStream, userMessage, type PromptStream } from "./prompt-stream.js";
+import { fetchPlanUsage, formatPlanUsage } from "./plan-usage.js";
 import {
 	claudeCodeSettingSources,
 	claudeCodeSettings,
@@ -880,6 +881,22 @@ let piUI: ExtensionUIContext | null = null;
 let piMode: ExtensionContext["mode"] | null = null;
 const activeQueryContexts = new Set<QueryContext>();
 
+/** Status-line key. OMP joins extension statuses by key, so a stable one keeps
+ *  the windows in the same place across turns. */
+const PLAN_USAGE_STATUS_KEY = "claude-usage";
+
+/** Read the plan's 5h/7d windows off the live query and hand them to the host
+ *  status line. Claude Code makes the upstream call with its own credential —
+ *  nothing here reads or stores a token. Silent on every failure: this is a
+ *  display nicety and must never affect a turn. */
+async function publishPlanUsage(sdkQuery: unknown): Promise<void> {
+	if (!piUI?.setStatus) return;
+	const usage = await fetchPlanUsage(sdkQuery);
+	const text = formatPlanUsage(usage);
+	debug(`planUsage: ${text ?? "(unavailable)"}`);
+	piUI.setStatus(PLAN_USAGE_STATUS_KEY, text);
+}
+
 // Defaults that silently cost the user something (no Opus 1M on Max, no
 // AskClaude tool) are announced once. Deferred to the first bridge query rather
 // than session_start: the notice persists a flag to the global config, and
@@ -1343,6 +1360,10 @@ async function consumeQuery(
 		if (message.type === "result") {
 			queryCtx.promptStream?.end();
 			logServedContextWindow("result", message, model);
+			// Plan windows only exist on a warm session, and the control request has
+			// to land while this iterator is still live — awaiting it after the loop
+			// races the transport teardown. It costs one round trip and no tokens.
+			await publishPlanUsage(sdkQuery);
 			resultError = resultErrorText(message);
 			if (resultError !== undefined) {
 				// Consume the rejection alongside the failure it caused, so a later

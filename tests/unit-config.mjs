@@ -70,6 +70,7 @@ describe("loadConfig", () => {
 				startupNoticeShown: undefined,
 				provider: { plan: "max" },
 				askClaude: { enabled: false },
+				statusUsage: {},
 			});
 		} finally {
 			rmSync(cwd, { recursive: true, force: true });
@@ -96,6 +97,7 @@ describe("loadConfig", () => {
 				startupNoticeShown: undefined,
 				provider: { plan: "max", strictMcpConfig: true, autoMemoryEnabled: true },
 				askClaude: { enabled: false, defaultMode: "read" },
+				statusUsage: {},
 			});
 		} finally {
 			rmSync(cwd, { recursive: true, force: true });
@@ -160,6 +162,7 @@ describe("loadConfig", () => {
 				startupNoticeShown: undefined,
 				provider: { plan: "max" },
 				askClaude: {},
+				statusUsage: {},
 			});
 		} finally {
 			if (oldEnv === undefined) delete process.env.PI_CODING_AGENT_DIR;
@@ -189,6 +192,7 @@ describe("loadConfig", () => {
 				startupNoticeShown: undefined,
 				provider: { plan: "pro" },
 				askClaude: {},
+				statusUsage: {},
 			});
 		} finally {
 			if (oldEnv === undefined) delete process.env.PI_CODING_AGENT_DIR;

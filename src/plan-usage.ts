@@ -50,26 +50,65 @@ function resetSuffix(resetsAt: string | null | undefined, now: number, unit: "m"
 	return ` (${text})`;
 }
 
-function renderWindow(label: string, window: PlanWindow, now: number, unit: "m" | "h"): string | undefined {
+/** Quarter-resolution usage bar, carrying over two honesty properties from the
+ *  Claude Code status-line script this mirrors: any nonzero usage draws
+ *  something, and anything short of the end never draws full. A whole-cell bar
+ *  at width 10 is 10% per cell, which would round 27% down to a bar reading
+ *  20%; counting quarters keeps it truthful. */
+export function buildBar(percent: number, width: number): string {
+	if (width <= 0) return "";
+	const clamped = Math.min(100, Math.max(0, percent));
+	const quarters = Math.round((clamped * width * 4) / 100);
+	let full = Math.floor(quarters / 4);
+	let part = quarters % 4;
+	if (clamped > 0 && full === 0 && part === 0) part = 1;
+	if (full >= width) {
+		full = width;
+		part = 0;
+	}
+	const partial = ["", "\u25D4", "\u25D1", "\u25D5"][part];
+	const empty = width - full - (part > 0 ? 1 : 0);
+	return `${"\u25CF".repeat(full)}${partial}${"\u25CB".repeat(empty)}`;
+}
+
+function renderWindow(label: string, window: PlanWindow, now: number, unit: "m" | "h", barWidth: number): string | undefined {
 	const utilization = window?.utilization;
 	if (typeof utilization !== "number") return undefined;
-	return `${label} ${Math.round(utilization)}%${resetSuffix(window?.resets_at, now, unit)}`;
+	const bar = buildBar(utilization, barWidth);
+	return `${label} ${bar ? `${bar} ` : ""}${Math.round(utilization)}%${resetSuffix(window?.resets_at, now, unit)}`;
 }
+
+export type PlanUsageOptions = {
+	now?: number;
+	/** Cells per bar; 0 renders percentages only. */
+	barWidth?: number;
+	/** Per-model weekly buckets, which the SDK response does not carry. */
+	modelScoped?: { name: string; pct: number }[];
+};
 
 /** Returns undefined when no window can be reported, so the caller can clear
  *  the status rather than publish an empty one. */
-export function formatPlanUsage(response: PlanUsageResponse | undefined, now = Date.now()): string | undefined {
-	if (!response?.rate_limits) return undefined;
-	const limits = response.rate_limits;
-	const parts = [
-		renderWindow("5h", limits.five_hour ?? null, now, "m"),
-		renderWindow("7d", limits.seven_day ?? null, now, "h"),
-		renderWindow("7d opus", limits.seven_day_opus ?? null, now, "h"),
-	].filter((part): part is string => part !== undefined);
+export function formatPlanUsage(response: PlanUsageResponse | undefined, options: PlanUsageOptions = {}): string | undefined {
+	const { now = Date.now(), barWidth = 5, modelScoped = [] } = options;
+	const limits = response?.rate_limits;
+	const parts = limits
+		? [
+			renderWindow("5h", limits.five_hour ?? null, now, "m", barWidth),
+			renderWindow("7d", limits.seven_day ?? null, now, "h", barWidth),
+			renderWindow("7d opus", limits.seven_day_opus ?? null, now, "h", barWidth),
+		].filter((part): part is string => part !== undefined)
+		: [];
+
+	// The per-model rows share the seven-day reset the row above already
+	// carries, so they show the bucket and its number and nothing more.
+	for (const scoped of modelScoped) {
+		const bar = buildBar(scoped.pct, barWidth);
+		parts.push(`${scoped.name} ${bar ? `${bar} ` : ""}${Math.round(scoped.pct)}%`);
+	}
 	if (parts.length === 0) return undefined;
 
 	// Tier word for the status line: "max" -> "Max".
-	const tier = response.subscription_type?.trim();
+	const tier = response?.subscription_type?.trim();
 	const label = tier ? tier.charAt(0).toUpperCase() + tier.slice(1) : undefined;
 	return [label, ...parts].filter(Boolean).join(" · ");
 }

@@ -19,6 +19,7 @@ import { extractAllToolResults as _extractAllToolResults, type McpResult } from 
 import { QueryContext, ctx } from "./query-state.js";
 import { makePromptStream, userMessage, type PromptStream } from "./prompt-stream.js";
 import { fetchPlanUsage, formatPlanUsage } from "./plan-usage.js";
+import { defaultModelUsageCachePath, readModelScopedUsage, requestModelUsageRefresh } from "./model-scoped-usage.js";
 import {
 	claudeCodeSettingSources,
 	claudeCodeSettings,
@@ -192,6 +193,7 @@ const SDK_TO_PI_TOOL_NAME: Record<string, string> = {
 // MODELS is buildModels(getModels("anthropic")) — projection kept in models.js.
 const MODELS = buildModels(getModels("anthropic"));
 let providerSettings: NonNullable<Config["provider"]> = {};
+let statusUsageSettings: NonNullable<Config["statusUsage"]> = {};
 let longContextSettings: LongContextSettings = { plan: "pro", longContextExtraUsage: false };
 
 function resolveModel(input: string) {
@@ -886,14 +888,27 @@ const activeQueryContexts = new Set<QueryContext>();
 const PLAN_USAGE_STATUS_KEY = "claude-usage";
 
 /** Read the plan's 5h/7d windows off the live query and hand them to the host
- *  status line. Claude Code makes the upstream call with its own credential —
- *  nothing here reads or stores a token. Silent on every failure: this is a
- *  display nicety and must never affect a turn. */
+ *  status line, with the per-model weekly buckets the SDK omits folded in from
+ *  Claude Code's own cache. Claude Code makes every upstream call with its own
+ *  credential — nothing here reads or stores a token. Silent on every failure:
+ *  this is a display nicety and must never affect a turn. */
 async function publishPlanUsage(sdkQuery: unknown): Promise<void> {
 	if (!piUI?.setStatus) return;
+	const settings = statusUsageSettings;
 	const usage = await fetchPlanUsage(sdkQuery);
-	const text = formatPlanUsage(usage);
-	debug(`planUsage: ${text ?? "(unavailable)"}`);
+
+	const cachePath = settings.modelCachePath ?? defaultModelUsageCachePath();
+	const modelScoped = readModelScopedUsage(cachePath, Date.now(), settings.modelMaxAgeSec);
+	// A miss is usually a stale cache, so nudge whoever owns it. The rows this
+	// brings back land on the next turn rather than this one, which is the right
+	// trade for never blocking a render on the network.
+	if (!modelScoped) requestModelUsageRefresh(settings.modelRefreshCommand);
+
+	const text = formatPlanUsage(usage, {
+		barWidth: settings.barWidth,
+		modelScoped,
+	});
+	debug(`planUsage: ${text ?? "(unavailable)"} (scoped=${modelScoped?.length ?? 0} from ${cachePath})`);
 	piUI.setStatus(PLAN_USAGE_STATUS_KEY, text);
 }
 
@@ -2083,6 +2098,7 @@ export default function (pi: ExtensionAPI) {
 	const config = loadConfig(process.cwd());
 	debug("loadConfig:", JSON.stringify(config));
 	providerSettings = config.provider ?? {};
+	statusUsageSettings = config.statusUsage ?? {};
 	// We need these settings to know if we're eligible for 1M context on certain models
 	// Validate at the boundary: a non-array here would throw inside every
 	// claudeCodeModelId call and brick the extension at activation.

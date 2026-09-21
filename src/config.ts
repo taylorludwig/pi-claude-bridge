@@ -39,6 +39,20 @@ export interface Config {
 		forceTwoHundredK?: string[];
 		settingSources?: ClaudeSettingSource[];
 	};
+	/** The plan-usage readout published to the host status line. */
+	statusUsage?: {
+		// Cells per usage bar; 0 renders percentages without bars.
+		barWidth?: number;
+		// Cache file holding per-model weekly buckets, as written by Claude
+		// Code's own status-line script. Defaults to that script's path.
+		modelCachePath?: string;
+		// Stop reporting per-model buckets once the cache is this old.
+		modelMaxAgeSec?: number;
+		// Shell command that refreshes the cache above; spawned detached and
+		// throttled when the cache is stale. It, not the bridge, holds the
+		// credential that endpoint needs.
+		modelRefreshCommand?: string;
+	};
 }
 
 export function tryParseJson(path: string): Partial<Config> {
@@ -105,5 +119,6 @@ export function loadConfig(cwd: string): Config {
 		startupNoticeShown: project.startupNoticeShown ?? global.startupNoticeShown,
 		askClaude: { ...global.askClaude, ...project.askClaude },
 		provider: { ...global.provider, ...project.provider },
+		statusUsage: { ...global.statusUsage, ...project.statusUsage },
 	};
 }

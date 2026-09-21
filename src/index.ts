@@ -2,8 +2,8 @@ import { calculateCost, StringEnum, type AssistantMessage, type AssistantMessage
 import * as piAi from "@earendil-works/pi-ai";
 import { getModels } from "@earendil-works/pi-ai/compat";
 import * as codingAgent from "@earendil-works/pi-coding-agent";
-import type { BranchSummaryResult, CompactionEntry, ExtensionAPI, ExtensionContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
-import { query, type EffortLevel, type SDKMessage, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
+import type { BranchSummaryResult, CompactionEntry, CompactionResult, ExtensionAPI, ExtensionContext, ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import { query, type EffortLevel, type Query, type SDKMessage, type SettingSource } from "@anthropic-ai/claude-agent-sdk";
 import type { Base64ImageSource, ContentBlockParam } from "@anthropic-ai/sdk/resources";
 import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
@@ -52,11 +52,73 @@ type HostCodingAgent = {
 	generateBranchSummary?: typeof codingAgent.generateBranchSummary;
 	buildSessionContext?: (entries: Parameters<typeof codingAgent.buildSessionContext>[0]) => { messages: Context["messages"] };
 	keyHint?: (action: string, fallback: string) => string;
+	/** OMP-only, and reachable through its legacy-pi compat shim (`generateHandoff` and
+	 *  `prepareCompaction` are not). Read as a host marker, never called. */
+	getOpenAiRemoteCompactionPayload?: unknown;
 };
 
 const hostCodingAgent = codingAgent as unknown as HostCodingAgent;
 const hostCompact = hostCodingAgent.compact;
 const hostGenerateBranchSummary = hostCodingAgent.generateBranchSummary;
+
+/** Both hosts export `compact`, with different positional signatures, and each accepts
+ *  the other's arguments silently:
+ *
+ *  - pi 0.86 — `(preparation, model, apiKey, headers, customInstructions, signal,
+ *    thinkingLevel, streamFn, env, retry, callbacks, sessionId)`; the isolation seam is
+ *    the 8th positional, `streamFn`.
+ *  - OMP — `(preparation, model, apiKey, customInstructions, signal, options)`; the seam
+ *    is `options.completeImpl`, and pi's `streamFn` falls past the parameter list while
+ *    `customInstructions` lands in the signal slot.
+ *
+ *  Called with the wrong shape the seam is simply dropped, so the host summarizes through
+ *  the LIVE provider carrying its own summarization system prompt — which no
+ *  `before_agent_start` recorded. The resolver throws, the takeover reports the throw, and
+ *  compaction is cancelled on every attempt until the session overflows. Arity
+ *  discriminates the two, corroborated by an OMP-only export; an unrecognized shape
+ *  declines the takeover instead of guessing at it.
+ */
+type HostCompactShape = "pi" | "omp" | "unknown";
+type OmpSummaryComplete = (model: Model<any>, context: Context, options?: SimpleStreamOptions) => Promise<AssistantMessage>;
+type OmpCompact = (
+	preparation: unknown,
+	model: Model<any>,
+	apiKey: string | undefined,
+	customInstructions: string | undefined,
+	signal: AbortSignal | undefined,
+	options: { completeImpl?: OmpSummaryComplete },
+) => Promise<CompactionResult>;
+
+function detectCompactShape(host: HostCodingAgent): HostCompactShape {
+	if (!host.compact) return "unknown";
+	if (host.compact.length >= 8) return "pi";
+	return typeof host.getOpenAiRemoteCompactionPayload === "function" ? "omp" : "unknown";
+}
+
+const hostCompactShape = detectCompactShape(hostCodingAgent);
+
+/** The one place the two shapes are reconciled. Both branches MUST name the isolated
+ *  Claude Code subprocess — a branch that omits its host's seam summarizes through the
+ *  live provider, which is the failure this whole takeover exists to prevent.
+ *
+ *  `preparation` has no exported type on either host; it is the hook event's own value,
+ *  handed straight back. */
+function callHostCompact(
+	compactFn: NonNullable<HostCodingAgent["compact"]>,
+	shape: HostCompactShape,
+	preparation: Parameters<NonNullable<HostCodingAgent["compact"]>>[0],
+	model: Model<any>,
+	customInstructions: string | undefined,
+	signal: AbortSignal | undefined,
+): Promise<CompactionResult> {
+	if (shape === "omp") {
+		// Cast reason: the same export under a different, unexpressible positional
+		// signature; `detectCompactShape` is the check that earns it.
+		const ompCompact = compactFn as unknown as OmpCompact;
+		return ompCompact(preparation, model, undefined, customInstructions, signal, { completeImpl: isolatedCompleteFn });
+	}
+	return compactFn(preparation, model, undefined, undefined, customInstructions, signal, undefined, isolatedStreamFn, undefined);
+}
 
 function normalizeSystemPrompt(value: string | readonly string[] | undefined): string | undefined {
 	if (typeof value === "string") return value || undefined;
@@ -493,18 +555,63 @@ function isolatedStreamFn(model: Model<any>, context: Context, options?: SimpleS
 	return stream;
 }
 
+/** OMP's isolation seam for one-off summaries. Pi hands its summarizer a `streamFn`
+ *  and reads the stream's result; OMP hands it `options.completeImpl` and awaits an
+ *  AssistantMessage. Same subprocess, same prompt, different call shape — and a host
+ *  given only the other one silently summarizes through the live provider instead. */
+async function isolatedCompleteFn(model: Model<any>, context: Context, options?: SimpleStreamOptions): Promise<AssistantMessage> {
+	const outcome = await runIsolatedSummaryQuery(model, context, options);
+	if (outcome.kind === "text") return newAssistantOutput(model, outcome.text, "stop");
+	if (outcome.kind === "aborted") return newAssistantOutput(model, "", "aborted", "Operation aborted");
+	return newAssistantOutput(model, "", "error", outcome.message);
+}
+
 async function runIsolatedSummary(
 	model: Model<any>,
 	context: Context,
 	options: SimpleStreamOptions | undefined,
 	stream: AssistantMessageEventStream,
 ): Promise<void> {
+	try {
+		const outcome = await runIsolatedSummaryQuery(model, context, options);
+		if (outcome.kind === "aborted") {
+			stream.push({ type: "error", reason: "aborted", error: newAssistantOutput(model, "", "aborted", "Operation aborted") });
+			stream.end();
+			return;
+		}
+		if (outcome.kind === "error") {
+			stream.push({ type: "error", reason: "error", error: newAssistantOutput(model, "", "error", outcome.message) });
+			stream.end();
+			return;
+		}
+		stream.push({ type: "done", reason: "stop", message: newAssistantOutput(model, outcome.text, "stop") });
+		stream.end();
+	} catch (err) {
+		const msg = errorMessage(err);
+		debug("runIsolatedSummary threw; pushing terminal error", err);
+		stream.push({ type: "error", reason: "error", error: newAssistantOutput(model, "", "error", msg) });
+		stream.end();
+	}
+}
+
+type IsolatedSummaryOutcome =
+	| { kind: "text"; text: string }
+	| { kind: "aborted" }
+	| { kind: "error"; message: string };
+
+/** One Claude Code subprocess for one summarization prompt, never touching the live
+ *  session or the prompt-capture resolver. */
+async function runIsolatedSummaryQuery(
+	model: Model<any>,
+	context: Context,
+	options: SimpleStreamOptions | undefined,
+): Promise<IsolatedSummaryOutcome> {
 	// pi 0.86 delivers compaction/branch-summary requests as a transcript: the summarization
 	// prompt folded into a leading system message ahead of the lone user message (issue #106).
 	// Recover the 0.85 shape so the extraction assertion below holds and the summarization
 	// prompt still reaches CC as its systemPrompt.
 	context = toBridgeContext(context);
-	let sdkQuery: ReturnType<typeof query> | undefined;
+	let sdkQuery: Query | undefined;
 	let wasAborted = false;
 	const onAbort = () => {
 		wasAborted = true;
@@ -576,30 +683,19 @@ async function runIsolatedSummary(
 		}
 
 		if (wasAborted) {
-			const output = newAssistantOutput(model, "", "aborted", "Operation aborted");
 			debug("compact summary: aborted");
-			stream.push({ type: "error", reason: "aborted", error: output });
-			stream.end();
-			return;
+			return { kind: "aborted" };
 		}
 
 		const text = finalText || assistantText;
 		if (errorText || !text.trim()) {
 			const msg = errorText ?? "Claude Code summary returned empty text";
 			debug(`compact summary: error ${msg}`);
-			stream.push({ type: "error", reason: "error", error: newAssistantOutput(model, "", "error", msg) });
-			stream.end();
-			return;
+			return { kind: "error", message: msg };
 		}
 
 		debug(`compact summary: done textLen=${text.length}`);
-		stream.push({ type: "done", reason: "stop", message: newAssistantOutput(model, text, "stop") });
-		stream.end();
-	} catch (err) {
-		const msg = errorMessage(err);
-		debug("runIsolatedSummary threw; pushing terminal error", err);
-		stream.push({ type: "error", reason: "error", error: newAssistantOutput(model, "", "error", msg) });
-		stream.end();
+		return { kind: "text", text };
 	} finally {
 		options?.signal?.removeEventListener("abort", onAbort);
 		try { sdkQuery?.close(); } catch {}
@@ -819,6 +915,9 @@ export const __test = {
 	CC_CHILD_ENV,
 	buildMcpServers,
 	branchSummaryOutcome,
+	callHostCompact,
+	detectCompactShape,
+	hostCompactShape,
 	get promptCaptures() {
 		return promptCaptures;
 	},
@@ -1377,7 +1476,7 @@ function processAssistantMessage(message: SDKMessage, model: Model<any>, customT
  *  whichever path handles it first (processStreamEvent or processAssistantMessage),
  *  and the MCP handler blocks the generator until pi delivers the tool result. */
 async function consumeQuery(
-	sdkQuery: ReturnType<typeof query>,
+	sdkQuery: Query,
 	customToolNameToPi: Map<string, string>,
 	model: Model<any>,
 	wasAborted: () => boolean,
@@ -2240,27 +2339,24 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_before_compact", async (event, ctx) => {
 		if (ctx.model?.baseUrl !== "claude-bridge") return undefined;
-		if (!hostCompact) {
-			debug("session_before_compact: host does not export compaction takeover API");
+		if (!hostCompact || hostCompactShape === "unknown") {
+			debug(`session_before_compact: no recognized compaction takeover API (shape=${hostCompactShape}, arity=${hostCompact?.length ?? "n/a"})`);
 			return undefined;
 		}
 		debug(
-			`session_before_compact: takeover reason=${event.reason} willRetry=${event.willRetry} ` +
+			`session_before_compact: takeover host=${hostCompactShape} reason=${event.reason} willRetry=${event.willRetry} ` +
 			`isSplitTurn=${event.preparation.isSplitTurn} messages=${event.preparation.messagesToSummarize.length} ` +
 			`turnPrefix=${event.preparation.turnPrefixMessages.length}`,
 		);
 		try {
 			reinjectPriorCompactionFileOps(event.branchEntries, event.preparation);
-			const compaction = await hostCompact(
+			const compaction = await callHostCompact(
+				hostCompact,
+				hostCompactShape,
 				event.preparation,
 				ctx.model,
-				undefined,
-				undefined,
 				event.customInstructions,
 				event.signal,
-				undefined,
-				isolatedStreamFn,
-				undefined,
 			);
 			debug(`session_before_compact: takeover complete summaryLen=${compaction.summary.length}`);
 			return { compaction };
@@ -2309,13 +2405,17 @@ export default function (pi: ExtensionAPI) {
 		if (!userWantsSummary || entriesToSummarize.length === 0) return undefined;
 		debug(`session_before_tree: takeover entries=${entriesToSummarize.length} target=${event.preparation.targetId.slice(0, 8)}`);
 		try {
-			const result = await hostGenerateBranchSummary(entriesToSummarize, {
+			// OMP reads `options.completeImpl` where pi reads `options.streamFn`; each host
+			// ignores the other's key, so the isolated subprocess is named once in each shape.
+			const summaryOptions = {
 				model: ctx.model,
 				signal: event.signal,
 				customInstructions,
 				replaceInstructions,
 				streamFn: isolatedStreamFn,
-			});
+				completeImpl: isolatedCompleteFn,
+			};
+			const result = await hostGenerateBranchSummary(entriesToSummarize, summaryOptions);
 			return branchSummaryOutcome(result);
 		} catch (err) {
 			debug("session_before_tree: takeover failed; cancelling navigation", err);

@@ -215,17 +215,21 @@ export function formatPlanRows(response: PlanUsageResponse | undefined, options:
 		const shown = Math.round(elapsed);
 		const timeBar = buildTimeBar(elapsed, width);
 		// The delta is the whole point of the row, and it reads better as time
-		// than as percentage points: the gap between quota spent and window
-		// elapsed, scaled back onto the window's own duration and worded exactly
-		// like the reset beside it. Positive means the quota is burning faster
-		// than the window refills it — roughly how far ahead of the clock the
-		// spend has run.
-		const driftPercent = Math.round(utilization) - shown;
-		const driftMs = Math.abs(driftPercent / 100) * spec.windowMs;
+		// than as percentage points: the gap between window elapsed and quota
+		// spent, scaled back onto the window's own duration and worded exactly
+		// like the reset beside it.
+		//
+		// It is signed as HEADROOM, not as overspend: positive means the quota
+		// has lasted further than the clock, so there is that much of the window
+		// in hand. Every other number on this line — the resets — counts what is
+		// left, and a delta that read as debt would be the only one facing the
+		// other way.
+		const headroomPercent = shown - Math.round(utilization);
+		const headroomMs = Math.abs(headroomPercent / 100) * spec.windowMs;
 		const magnitude = spec.unit === "m"
-			? humanizeMinutes(Math.round(driftMs / 60_000))
-			: humanizeHours(Math.round(driftMs / 3_600_000));
-		const sign = driftPercent > 0 ? "+" : driftPercent < 0 ? "-" : "";
+			? humanizeMinutes(Math.round(headroomMs / 60_000))
+			: humanizeHours(Math.round(headroomMs / 3_600_000));
+		const sign = headroomPercent > 0 ? "+" : headroomPercent < 0 ? "-" : "";
 		paceCols.push(`${spec.label} ${timeBar ? `${timeBar} ` : ""}${shown}% (${sign}${magnitude})`);
 	}
 

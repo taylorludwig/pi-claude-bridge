@@ -73,17 +73,32 @@ describe("formatPlanRows layout", () => {
 });
 
 describe("formatPlanRows content", () => {
-	it("reports elapsed against spent, signed so burning hot reads positive", () => {
-		// 5h window with 2h25m left is 52% elapsed against 15% spent: cool.
-		// 7d window with 1d5h left is 83% elapsed against 86% spent: just hot.
+	it("reports the gap as time on the window's own scale, signed so hot reads positive", () => {
+		// 5h window with 2h25m left is 52% elapsed against 15% spent: 37 points
+		// cool, which on a five-hour window is 1h51m of slack.
+		// 7d window with 1d5h left is 83% elapsed against 86% spent: 3 points
+		// hot, which on a seven-day window is about 5 hours.
 		const rows = formatPlanRows({
 			rate_limits: {
 				five_hour: { utilization: 15, resets_at: inMinutes(145) },
 				seven_day: { utilization: 86, resets_at: inMinutes(29 * 60) },
 			},
 		}, { now: NOW, barWidth: 0 });
-		assert.equal(rows.usage, "\u2007\u2007\u2007\u2007 · 5h 15% (2h 25m) · 7d 86% (1d 5h)");
-		assert.equal(rows.pace, "pace · 5h 52% (-37)\u2007\u2007\u2007 · 7d 83% (+3)");
+		assert.equal(rows.usage, "\u2007\u2007\u2007\u2007 · 5h 15% (2h 25m)\u2007 · 7d 86% (1d 5h)");
+		assert.equal(rows.pace, "pace · 5h 52% (-1h 51m) · 7d 83% (+5h)");
+	});
+
+	it("scales the same percentage gap differently for each window", () => {
+		// Ten points is half an hour of a five-hour window and seventeen hours of
+		// a seven-day one. Reporting both as "10" was the thing worth fixing.
+		const rows = formatPlanRows({
+			rate_limits: {
+				five_hour: { utilization: 60, resets_at: inMinutes(150) },
+				seven_day: { utilization: 60, resets_at: inMinutes(84 * 60) },
+			},
+		}, { now: NOW, barWidth: 0 });
+		assert.match(rows.pace, /5h 50% \(\+30m\)/);
+		assert.match(rows.pace, /7d 50% \(\+17h\)/);
 	});
 
 	it("reports nothing at all when the session is cold", () => {
@@ -103,7 +118,7 @@ describe("formatPlanRows content", () => {
 			},
 		}, { now: NOW, barWidth: 0 });
 		assert.equal(rows.usage, "Pro\u2007 · 7d 12% (1h)");
-		assert.equal(rows.pace, "pace · 7d 99% (-87)");
+		assert.equal(rows.pace, "pace · 7d 99% (-6d 2h)");
 	});
 
 	it("holds a blank pace column for a window that never dated its reset", () => {
@@ -116,7 +131,7 @@ describe("formatPlanRows content", () => {
 			},
 		}, { now: NOW, barWidth: 0 });
 		assert.equal(rows.usage, "\u2007\u2007\u2007\u2007 · 5h 15% · 7d 86% (1d 5h)");
-		assert.equal(rows.pace, "pace · \u2007\u2007\u2007\u2007\u2007\u2007 · 7d 83% (+3)");
+		assert.equal(rows.pace, "pace · \u2007\u2007\u2007\u2007\u2007\u2007 · 7d 83% (+5h)");
 	});
 
 	it("drops the pace row when no window dated its reset", () => {
@@ -161,9 +176,9 @@ describe("formatPlanRows content", () => {
 
 	it("clamps a reset already past and one further out than the window", () => {
 		const past = formatPlanRows({ rate_limits: { five_hour: { utilization: 99, resets_at: inMinutes(-60) } } }, { now: NOW, barWidth: 0 });
-		assert.equal(past.pace, "pace · 5h 100% (-1)");
+		assert.equal(past.pace, "pace · 5h 100% (-3m)");
 		const skewed = formatPlanRows({ rate_limits: { five_hour: { utilization: 0, resets_at: inMinutes(600) } } }, { now: NOW, barWidth: 0 });
-		assert.equal(skewed.pace, "pace · 5h 0% (0)");
+		assert.equal(skewed.pace, "pace · 5h 0% (0m)");
 	});
 
 	it("forces one width on every bar when the caller names one", () => {

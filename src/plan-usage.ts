@@ -214,11 +214,19 @@ export function formatPlanRows(response: PlanUsageResponse | undefined, options:
 		}
 		const shown = Math.round(elapsed);
 		const timeBar = buildTimeBar(elapsed, width);
-		// The delta is the whole point of the row: quota spent minus window
-		// elapsed. Positive means the quota is burning faster than the window
-		// refills it, which is the judgement the two bars exist to support.
-		const drift = Math.round(utilization) - shown;
-		paceCols.push(`${spec.label} ${timeBar ? `${timeBar} ` : ""}${shown}% (${drift > 0 ? "+" : ""}${drift})`);
+		// The delta is the whole point of the row, and it reads better as time
+		// than as percentage points: the gap between quota spent and window
+		// elapsed, scaled back onto the window's own duration and worded exactly
+		// like the reset beside it. Positive means the quota is burning faster
+		// than the window refills it — roughly how far ahead of the clock the
+		// spend has run.
+		const driftPercent = Math.round(utilization) - shown;
+		const driftMs = Math.abs(driftPercent / 100) * spec.windowMs;
+		const magnitude = spec.unit === "m"
+			? humanizeMinutes(Math.round(driftMs / 60_000))
+			: humanizeHours(Math.round(driftMs / 3_600_000));
+		const sign = driftPercent > 0 ? "+" : driftPercent < 0 ? "-" : "";
+		paceCols.push(`${spec.label} ${timeBar ? `${timeBar} ` : ""}${shown}% (${sign}${magnitude})`);
 	}
 
 	// The per-model rows share the seven-day reset the row above already

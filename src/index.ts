@@ -18,7 +18,7 @@ import { verifyWrittenSession as _verifyWrittenSession } from "./session-verify.
 import { extractAllToolResults as _extractAllToolResults, type McpResult } from "./extract-tool-results.js";
 import { QueryContext, ctx } from "./query-state.js";
 import { makePromptStream, userMessage, type PromptStream } from "./prompt-stream.js";
-import { fetchPlanUsage, formatPlanPace, formatPlanUsage } from "./plan-usage.js";
+import { fetchPlanUsage, formatPlanRows } from "./plan-usage.js";
 import { defaultModelUsageCachePath, readModelScopedUsage, requestModelUsageRefresh } from "./model-scoped-usage.js";
 import {
 	claudeCodeSettingSources,
@@ -905,17 +905,14 @@ async function publishPlanUsage(sdkQuery: unknown): Promise<void> {
 	// trade for never blocking a render on the network.
 	if (!modelScoped) requestModelUsageRefresh(settings.modelRefreshCommand);
 
-	const text = formatPlanUsage(usage, {
+	const { usage: usageRow, pace } = formatPlanRows(usage, {
 		barWidth: settings.barWidth,
 		modelScoped,
+		showPace: settings.showPace !== false,
 	});
-	debug(`planUsage: ${text ?? "(unavailable)"} (scoped=${modelScoped?.length ?? 0} from ${cachePath})`);
-	piUI.setStatus(PLAN_USAGE_STATUS_KEY, text);
-
-	const pace = settings.showPace === false
-		? undefined
-		: formatPlanPace(usage, { barWidth: settings.barWidth });
-	debug(`planPace: ${pace ?? "(unavailable)"}`);
+	debug(`planUsage: ${usageRow ?? "(unavailable)"} (scoped=${modelScoped?.length ?? 0} from ${cachePath})`);
+	debug(`planPace:  ${pace ?? "(unavailable)"}`);
+	piUI.setStatus(PLAN_USAGE_STATUS_KEY, usageRow);
 	piUI.setStatus(PLAN_PACE_STATUS_KEY, pace);
 }
 

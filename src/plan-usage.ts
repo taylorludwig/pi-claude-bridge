@@ -268,3 +268,70 @@ export async function fetchPlanUsage(sdkQuery: unknown): Promise<PlanUsageRespon
 		return undefined;
 	}
 }
+
+/** Remembering the last reading across sessions.
+ *
+ * The windows exist only on a warm query, so a session that has not run a turn
+ * yet can learn nothing from the SDK — asking anyway would mean sending a real
+ * request, which is spending quota to display quota. Instead the last reading
+ * is kept on disk and shown at once, then replaced by live numbers when the
+ * first turn lands.
+ *
+ * The staleness is bounded by the data itself rather than only by a clock: a
+ * window whose reset has passed has rolled over, so its utilization belongs to
+ * a window that no longer exists and it is dropped. What survives is a reading
+ * from inside the window still running, which is the one that can still be
+ * roughly true. The pace row is unaffected either way — it is derived from
+ * `resets_at`, which is absolute, so it is exact even from a cold cache. */
+export type CachedPlanUsage = { fetched_at?: number; response?: PlanUsageResponse };
+
+/** Six hours, matching the ceiling on the per-model bucket cache beside it. */
+export const DEFAULT_PLAN_CACHE_MAX_AGE_SEC = 21_600;
+
+export function readCachedPlanUsage(
+	path: string,
+	readFile: (path: string) => string,
+	now = Date.now(),
+	maxAgeSec = DEFAULT_PLAN_CACHE_MAX_AGE_SEC,
+): PlanUsageResponse | undefined {
+	let cached: CachedPlanUsage;
+	try {
+		cached = JSON.parse(readFile(path)) as CachedPlanUsage;
+	} catch {
+		return undefined;
+	}
+	if (typeof cached?.fetched_at !== "number") return undefined;
+	if (now / 1000 - cached.fetched_at > maxAgeSec) return undefined;
+	const limits = cached.response?.rate_limits;
+	if (!limits) return undefined;
+
+	const live: PlanRateLimits = {};
+	let kept = 0;
+	for (const key of ["five_hour", "seven_day", "seven_day_opus"] as const) {
+		const window = limits[key];
+		const resetsAt = window?.resets_at ? Date.parse(window.resets_at) : Number.NaN;
+		// No reset, an unparseable one, or one already past: the window either
+		// cannot be placed in time or has rolled over since. Either way its
+		// number is not about the window running now.
+		if (Number.isNaN(resetsAt) || resetsAt <= now) continue;
+		live[key] = window;
+		kept++;
+	}
+	if (kept === 0) return undefined;
+	return { subscription_type: cached.response?.subscription_type, rate_limits: live };
+}
+
+export function writeCachedPlanUsage(
+	path: string,
+	writeFile: (path: string, content: string) => void,
+	response: PlanUsageResponse | undefined,
+	now = Date.now(),
+): void {
+	if (!response?.rate_limits) return;
+	const payload: CachedPlanUsage = { fetched_at: Math.floor(now / 1000), response };
+	try {
+		writeFile(path, JSON.stringify(payload));
+	} catch {
+		// A status-line nicety must never be the reason a turn reports a failure.
+	}
+}

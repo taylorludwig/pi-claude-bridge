@@ -75,6 +75,13 @@ export function globalConfigPath(): string {
 	return join(getAgentDir(), "claude-bridge.json");
 }
 
+/** Where the last live plan-usage reading is kept, so a session can show it
+ *  before its first turn. Beside the config it belongs to, not in Claude Code's
+ *  own status-line cache, which is that script's to own. */
+export function planUsageCachePath(): string {
+	return join(getAgentDir(), "claude-bridge-usage.json");
+}
+
 export function isOmpAgentDir(agentDir: string): boolean {
 	return agentDir.split(/[\\/]/).includes(".omp");
 }

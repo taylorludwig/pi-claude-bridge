@@ -8,7 +8,7 @@ import type { Base64ImageSource, ContentBlockParam } from "@anthropic-ai/sdk/res
 import { Type } from "typebox";
 import { Text } from "@earendil-works/pi-tui";
 import { createSession, deleteSession, openSession, repairToolPairing } from "cc-session-io";
-import { appendFileSync, mkdirSync, realpathSync, statSync } from "fs";
+import { appendFileSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { dirname, join } from "path";
 import { PROVIDER_ID, messageContentToText, convertPiMessages } from "./convert.js";
@@ -18,13 +18,14 @@ import { verifyWrittenSession as _verifyWrittenSession } from "./session-verify.
 import { extractAllToolResults as _extractAllToolResults, type McpResult } from "./extract-tool-results.js";
 import { QueryContext, ctx } from "./query-state.js";
 import { makePromptStream, userMessage, type PromptStream } from "./prompt-stream.js";
-import { fetchPlanUsage, formatPlanRows } from "./plan-usage.js";
+import { fetchPlanUsage, formatPlanRows, readCachedPlanUsage, writeCachedPlanUsage, type PlanUsageResponse } from "./plan-usage.js";
 import { defaultModelUsageCachePath, readModelScopedUsage, requestModelUsageRefresh } from "./model-scoped-usage.js";
 import {
 	claudeCodeSettingSources,
 	claudeCodeSettings,
 	loadConfig,
 	markStartupNoticeShown,
+	planUsageCachePath,
 	type Config,
 } from "./config.js";
 import {
@@ -888,15 +889,13 @@ const activeQueryContexts = new Set<QueryContext>();
 const PLAN_USAGE_STATUS_KEY = "claude-usage";
 const PLAN_PACE_STATUS_KEY = "claude-usage-pace";
 
-/** Read the plan's 5h/7d windows off the live query and hand them to the host
- *  status line, with the per-model weekly buckets the SDK omits folded in from
- *  Claude Code's own cache. Claude Code makes every upstream call with its own
- *  credential — nothing here reads or stores a token. Silent on every failure:
- *  this is a display nicety and must never affect a turn. */
-async function publishPlanUsage(sdkQuery: unknown): Promise<void> {
+/** Render whatever windows we have and hand them to the host status line. The
+ *  per-model weekly buckets the SDK omits are folded in from Claude Code's own
+ *  cache. Claude Code makes every upstream call with its own credential —
+ *  nothing here reads or stores a token. */
+function renderPlanRows(usage: PlanUsageResponse | undefined, source: string): void {
 	if (!piUI?.setStatus) return;
 	const settings = statusUsageSettings;
-	const usage = await fetchPlanUsage(sdkQuery);
 
 	const cachePath = settings.modelCachePath ?? defaultModelUsageCachePath();
 	const modelScoped = readModelScopedUsage(cachePath, Date.now(), settings.modelMaxAgeSec);
@@ -910,10 +909,36 @@ async function publishPlanUsage(sdkQuery: unknown): Promise<void> {
 		modelScoped,
 		showPace: settings.showPace !== false,
 	});
-	debug(`planUsage: ${usageRow ?? "(unavailable)"} (scoped=${modelScoped?.length ?? 0} from ${cachePath})`);
-	debug(`planPace:  ${pace ?? "(unavailable)"}`);
+	debug(`planUsage(${source}): ${usageRow ?? "(unavailable)"} (scoped=${modelScoped?.length ?? 0})`);
+	debug(`planPace(${source}):  ${pace ?? "(unavailable)"}`);
 	piUI.setStatus(PLAN_USAGE_STATUS_KEY, usageRow);
 	piUI.setStatus(PLAN_PACE_STATUS_KEY, pace);
+}
+
+/** Show the previous session's reading straight away.
+ *
+ *  The windows only exist on a warm query, so before the first turn there is
+ *  nothing live to ask for — and asking would mean sending a real request,
+ *  which is spending quota to render quota. The disk copy fills that gap and is
+ *  replaced the moment a turn completes. Never clears: a cache miss must leave
+ *  a live row from this session alone. */
+function publishCachedPlanUsage(): void {
+	if (!piUI?.setStatus) return;
+	const cached = readCachedPlanUsage(planUsageCachePath(), (p) => readFileSync(p, "utf8"));
+	if (!cached) {
+		debug("planUsage(cache): nothing usable on disk");
+		return;
+	}
+	renderPlanRows(cached, "cache");
+}
+
+/** Silent on every failure: this is a display nicety and must never affect a
+ *  turn. */
+async function publishPlanUsage(sdkQuery: unknown): Promise<void> {
+	if (!piUI?.setStatus) return;
+	const usage = await fetchPlanUsage(sdkQuery);
+	writeCachedPlanUsage(planUsageCachePath(), (p, c) => writeFileSync(p, c), usage);
+	renderPlanRows(usage, "live");
 }
 
 // Defaults that silently cost the user something (no Opus 1M on Max, no
@@ -2144,6 +2169,9 @@ export default function (pi: ExtensionAPI) {
 		if (event.reason === "new" || event.reason === "resume" || event.reason === "fork") {
 			clearSession(`session_start:${event.reason}`);
 		}
+		// piUI has only just been set, so this is the earliest the rows can be
+		// published — before the first turn, which is the whole point.
+		publishCachedPlanUsage();
 	});
 	// `--system-prompt` replaces pi's default rather than adding to it, but Claude
 	// Code's preset carries its own tool and permission guidance that the bridge

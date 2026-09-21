@@ -113,6 +113,66 @@ export function formatPlanUsage(response: PlanUsageResponse | undefined, options
 	return [label, ...parts].filter(Boolean).join(" · ");
 }
 
+/** Half-resolution elapsed bar. Deliberately a different glyph set from the
+ *  usage bar beside it: it measures a different quantity — how far through the
+ *  window the clock is, not how much quota is spent — and should not read as
+ *  the same thing at a glance. */
+export function buildTimeBar(percent: number, width: number): string {
+	if (width <= 0) return "";
+	const clamped = Math.min(100, Math.max(0, percent));
+	const halves = Math.round((clamped * width * 2) / 100);
+	let full = Math.floor(halves / 2);
+	let part = halves % 2;
+	if (clamped > 0 && full === 0 && part === 0) part = 1;
+	if (full >= width) {
+		full = width;
+		part = 0;
+	}
+	const empty = width - full - part;
+	return `${"\u2501".repeat(full)}${part > 0 ? "\u257E" : ""}${"\u2500".repeat(empty)}`;
+}
+
+/** How far through a rate-limit window the clock is, 0-100, or undefined when
+ *  the window did not say when it resets. */
+function elapsedPercent(resetsAt: string | null | undefined, now: number, windowMs: number): number | undefined {
+	if (!resetsAt) return undefined;
+	const at = Date.parse(resetsAt);
+	if (Number.isNaN(at)) return undefined;
+	const remainingMs = Math.min(windowMs, Math.max(0, at - now));
+	return ((windowMs - remainingMs) / windowMs) * 100;
+}
+
+const FIVE_HOUR_MS = 5 * 60 * 60 * 1000;
+const SEVEN_DAY_MS = 7 * 24 * 60 * 60 * 1000;
+
+function renderPace(label: string, window: PlanWindow, now: number, windowMs: number, barWidth: number): string | undefined {
+	const elapsed = elapsedPercent(window?.resets_at, now, windowMs);
+	if (elapsed === undefined) return undefined;
+	const bar = buildTimeBar(elapsed, barWidth);
+	const shown = Math.round(elapsed);
+	// The delta is the whole point of the row: quota spent minus window
+	// elapsed. Positive means the quota is burning faster than the window
+	// refills it, which is the judgement the two bars are there to support.
+	const utilization = window?.utilization;
+	const drift = typeof utilization === "number" ? Math.round(utilization) - shown : undefined;
+	const verdict = drift === undefined ? "" : ` (${drift > 0 ? "+" : ""}${drift})`;
+	return `${label} ${bar ? `${bar} ` : ""}${shown}%${verdict}`;
+}
+
+/** The companion row: how far through each window the clock is, against how
+ *  much of it has been spent. Undefined when no window dated its reset. */
+export function formatPlanPace(response: PlanUsageResponse | undefined, options: PlanUsageOptions = {}): string | undefined {
+	const { now = Date.now(), barWidth = 5 } = options;
+	const limits = response?.rate_limits;
+	if (!limits) return undefined;
+	const parts = [
+		renderPace("5h", limits.five_hour ?? null, now, FIVE_HOUR_MS, barWidth),
+		renderPace("7d", limits.seven_day ?? null, now, SEVEN_DAY_MS, barWidth),
+	].filter((part): part is string => part !== undefined);
+	if (parts.length === 0) return undefined;
+	return ["pace", ...parts].join(" · ");
+}
+
 const USAGE_METHOD = "usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET";
 
 /** Ask a live query for the plan windows.

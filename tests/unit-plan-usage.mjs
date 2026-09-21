@@ -13,7 +13,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-const { formatPlanUsage, fetchPlanUsage, buildBar } = await import("../src/plan-usage.js");
+const { formatPlanUsage, formatPlanPace, fetchPlanUsage, buildBar, buildTimeBar } = await import("../src/plan-usage.js");
 
 const NOW = Date.parse("2026-09-20T12:00:00.000Z");
 const inMinutes = (n) => new Date(NOW + n * 60_000).toISOString();
@@ -173,5 +173,68 @@ describe("formatPlanUsage with bars and per-model rows", () => {
 			modelScoped: [{ name: "Fable", pct: 78 }],
 		});
 		assert.equal(text, "Max · Fable 78%");
+	});
+});
+
+describe("buildTimeBar", () => {
+	it("uses a different glyph set from the usage bar beside it", () => {
+		// The two bars measure different quantities; reading as the same thing
+		// at a glance is the failure this guards.
+		assert.equal(buildTimeBar(50, 4), "━━──");
+		assert.equal(buildBar(50, 4).includes("━"), false);
+	});
+
+	it("draws something for any elapsed time and fills only at the end", () => {
+		assert.equal(buildTimeBar(0, 4), "────");
+		assert.equal(buildTimeBar(1, 4), "╾───");
+		assert.equal(buildTimeBar(100, 4), "━━━━");
+	});
+
+	it("keeps half-cell resolution", () => {
+		assert.equal(buildTimeBar(62, 4), "━━╾─");
+	});
+});
+
+describe("formatPlanPace", () => {
+	it("reports elapsed against spent, signed so hot reads positive", () => {
+		// 5h window, 2h30m left => half elapsed; 14% spent is well under pace.
+		// 7d window, 1d5h left => 83% elapsed; 86% spent is just over.
+		const text = formatPlanPace({
+			rate_limits: {
+				five_hour: { utilization: 14, resets_at: inMinutes(150) },
+				seven_day: { utilization: 86, resets_at: inMinutes(29 * 60) },
+			},
+		}, { now: NOW, barWidth: 5 });
+		assert.equal(text, "pace · 5h ━━╾── 50% (-36) · 7d ━━━━─ 83% (+3)");
+	});
+
+	it("omits a window that never said when it resets", () => {
+		const text = formatPlanPace({
+			rate_limits: {
+				five_hour: { utilization: 14 },
+				seven_day: { utilization: 86, resets_at: inMinutes(29 * 60) },
+			},
+		}, { now: NOW, barWidth: 0 });
+		assert.equal(text, "pace · 7d 83% (+3)");
+	});
+
+	it("reports nothing when no window dated its reset", () => {
+		assert.equal(formatPlanPace({ rate_limits: { five_hour: { utilization: 14 } } }, { now: NOW }), undefined);
+		assert.equal(formatPlanPace({ rate_limits: null }, { now: NOW }), undefined);
+		assert.equal(formatPlanPace(undefined, { now: NOW }), undefined);
+	});
+
+	it("shows elapsed alone when the window carries no utilization", () => {
+		const text = formatPlanPace({
+			rate_limits: { five_hour: { utilization: null, resets_at: inMinutes(150) } },
+		}, { now: NOW, barWidth: 0 });
+		assert.equal(text, "pace · 5h 50%");
+	});
+
+	it("clamps a reset already past and one further out than the window", () => {
+		const past = formatPlanPace({ rate_limits: { five_hour: { utilization: 99, resets_at: inMinutes(-60) } } }, { now: NOW, barWidth: 0 });
+		assert.equal(past, "pace · 5h 100% (-1)");
+		const skewed = formatPlanPace({ rate_limits: { five_hour: { utilization: 0, resets_at: inMinutes(600) } } }, { now: NOW, barWidth: 0 });
+		assert.equal(skewed, "pace · 5h 0% (0)");
 	});
 });

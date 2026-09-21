@@ -18,7 +18,7 @@ import { verifyWrittenSession as _verifyWrittenSession } from "./session-verify.
 import { extractAllToolResults as _extractAllToolResults, type McpResult } from "./extract-tool-results.js";
 import { QueryContext, ctx } from "./query-state.js";
 import { makePromptStream, userMessage, type PromptStream } from "./prompt-stream.js";
-import { fetchPlanUsage, formatPlanUsage } from "./plan-usage.js";
+import { fetchPlanUsage, formatPlanPace, formatPlanUsage } from "./plan-usage.js";
 import { defaultModelUsageCachePath, readModelScopedUsage, requestModelUsageRefresh } from "./model-scoped-usage.js";
 import {
 	claudeCodeSettingSources,
@@ -883,9 +883,10 @@ let piUI: ExtensionUIContext | null = null;
 let piMode: ExtensionContext["mode"] | null = null;
 const activeQueryContexts = new Set<QueryContext>();
 
-/** Status-line key. OMP joins extension statuses by key, so a stable one keeps
- *  the windows in the same place across turns. */
+/** Status-line keys. OMP sorts extension statuses by key and renders one line
+ *  each under the bar, so the pace row sorts after the windows it annotates. */
 const PLAN_USAGE_STATUS_KEY = "claude-usage";
+const PLAN_PACE_STATUS_KEY = "claude-usage-pace";
 
 /** Read the plan's 5h/7d windows off the live query and hand them to the host
  *  status line, with the per-model weekly buckets the SDK omits folded in from
@@ -910,6 +911,12 @@ async function publishPlanUsage(sdkQuery: unknown): Promise<void> {
 	});
 	debug(`planUsage: ${text ?? "(unavailable)"} (scoped=${modelScoped?.length ?? 0} from ${cachePath})`);
 	piUI.setStatus(PLAN_USAGE_STATUS_KEY, text);
+
+	const pace = settings.showPace === false
+		? undefined
+		: formatPlanPace(usage, { barWidth: settings.barWidth });
+	debug(`planPace: ${pace ?? "(unavailable)"}`);
+	piUI.setStatus(PLAN_PACE_STATUS_KEY, pace);
 }
 
 // Defaults that silently cost the user something (no Opus 1M on Max, no

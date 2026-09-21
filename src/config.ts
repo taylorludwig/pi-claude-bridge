@@ -43,6 +43,8 @@ export interface Config {
 	statusUsage?: {
 		// Cells per usage bar; 0 renders percentages without bars.
 		barWidth?: number;
+		// Second row comparing quota spent against window elapsed. Default on.
+		showPace?: boolean;
 		// Cache file holding per-model weekly buckets, as written by Claude
 		// Code's own status-line script. Defaults to that script's path.
 		modelCachePath?: string;

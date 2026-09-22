@@ -161,4 +161,58 @@ describe("syncSharedSession", () => {
 			rmSync(cwd, { recursive: true, force: true });
 		}
 	});
+
+	// The cursor a finished turn records and the `priorMessages` the next turn
+	// compares it against must be counted in the same space. They were not: the
+	// provider's completion path recorded a raw `context.messages.length`, which
+	// counts the system messages `nonSystemMessages` strips — a notice, a
+	// tool-loadout update, a steering interjection. Each one drifted the cursor
+	// one past the history, and once the drift exceeded the single message of
+	// slack the reuse check allows, the next turn read pi's history as *shorter*
+	// than the cursor, fell into the subagent branch above, and launched Claude
+	// Code with no `--resume` — so it answered the prompt having never seen the
+	// conversation. Observed three times in one session (cursor 233 vs 232).
+	it("records a cursor the next turn can still resume from when system messages punctuate the turn", () => {
+		const cwd = mkdtempSync(join(tmpdir(), "sync-shared-session-"));
+		const sessionId = randomUUID();
+		const now = Date.now();
+		try {
+			// A settled turn: two exchanges, with system messages interleaved as pi
+			// delivers them mid-conversation.
+			const settled = [
+				{ role: "user", content: "Hi", timestamp: now },
+				{ role: "assistant", content: [{ type: "text", text: "Hello." }], timestamp: now },
+				{ role: "system", content: "", toolsAdded: [{ name: "grep", description: "", parameters: {} }], timestamp: now },
+				{ role: "user", content: "Next", timestamp: now },
+				{ role: "assistant", content: [{ type: "text", text: "Done." }], timestamp: now },
+				{ role: "system", content: "User interjection during work.", timestamp: now },
+			];
+
+			const seeded = createSession({ sessionId, projectPath: cwd });
+			seeded.importMessages(settled.filter((m) => m.role !== "system"));
+			seeded.save();
+
+			// What the completion path records for that turn.
+			const recorded = __test.historyCursor(settled);
+
+			// What syncSharedSession itself would call the same history — the two
+			// must agree, or every writer outside this function drifts.
+			__test.resetSharedSession();
+			__test.syncSharedSession([...settled, { role: "user", content: "Third", timestamp: now }], cwd);
+			assert.equal(recorded, __test.getSharedSession()?.cursor, "both cursor writers must count the same messages");
+
+			// The next turn, starting from the recorded cursor.
+			__test.setSharedSession({ sessionId, cursor: recorded, cwd });
+			const result = __test.syncSharedSession(
+				[...settled, { role: "user", content: "Third", timestamp: now }],
+				cwd,
+			);
+
+			assert.equal(result.sessionId, sessionId, "the next turn must resume the session, not start Claude Code cold");
+			assert.notEqual(result.preserveSharedSession, true, "a top-level turn is not the subagent shorter-context case");
+		} finally {
+			deleteSession(sessionId, cwd);
+			rmSync(cwd, { recursive: true, force: true });
+		}
+	});
 });

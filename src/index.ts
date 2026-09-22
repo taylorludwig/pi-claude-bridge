@@ -433,6 +433,19 @@ function turnStart(messages: Context["messages"]): number {
 	return i;
 }
 
+/** Length of `messages` in *cursor space*.
+ *
+ *  `sharedSession.cursor` indexes `nonSystemMessages(...)` — the same space
+ *  `syncSharedSession` slices `priorMessages` from. Writing a raw
+ *  `messages.length` instead drifts by one for every mid-conversation system
+ *  message (a notice, a tool-loadout update, a steering interjection). The
+ *  reuse check tolerates exactly one message of slack; past that the next turn
+ *  reads pi's history as *shorter* than the cursor, takes the shorter-context
+ *  branch meant for subagents, and starts Claude Code with no history at all. */
+function historyCursor(messages: Context["messages"]): number {
+	return nonSystemMessages(messages).length;
+}
+
 /** Extract the current user turn as a prompt string. Returns null if the last message is not a user message. */
 function extractUserPrompt(messages: Context["messages"]): string | null {
 	const turn = messages.slice(turnStart(messages)) as UserMessage[];
@@ -906,6 +919,7 @@ export const __test = {
 	},
 	toBridgeContext,
 	syncSharedSession,
+	historyCursor,
 	extractUserPromptBlocks,
 	consumeQuery,
 	finalizeCurrentStream,
@@ -1734,8 +1748,8 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 		// delivering its own results would drag it to that subagent's message count
 		// — observed pulling a parent from 5 back to 3, which cost the parent's next
 		// turn a full rebuild and a flushed prompt cache.
-		if (sharedSession && resultCtx === ctx()) sharedSession.cursor = context.messages.length;
-		resultCtx.latestCursor = Math.max(resultCtx.latestCursor, context.messages.length);
+		if (sharedSession && resultCtx === ctx()) sharedSession.cursor = historyCursor(context.messages);
+		resultCtx.latestCursor = Math.max(resultCtx.latestCursor, historyCursor(context.messages));
 		return stream;
 	}
 
@@ -1745,7 +1759,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	const lastMsg = context.messages[context.messages.length - 1];
 	if (lastMsg?.role === "toolResult") {
 		debug(`provider: orphaned tool result after abort, emitting end_turn`);
-		if (sharedSession && activeQueryContexts.size === 0) sharedSession.cursor = context.messages.length;
+		if (sharedSession && activeQueryContexts.size === 0) sharedSession.cursor = historyCursor(context.messages);
 		// No query owns this result, so there is no context to reset: resetTurnState
 		// on the top-level ctx() would replace a live parent's turnOutput mid-stream,
 		// stranding the blocks it had already emitted. A throwaway context just
@@ -1961,7 +1975,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 				}
 				debug(`provider: query done, ignoring captured session ${capturedSessionId?.slice(0, 8) ?? "none"} to preserve shared session`);
 			} else if (sessionId) {
-				const cursor = Math.max(context.messages.length, queryCtx.latestCursor, sharedSession?.cursor ?? 0);
+				const cursor = Math.max(historyCursor(context.messages), queryCtx.latestCursor, sharedSession?.cursor ?? 0);
 				debug(`provider: query done, session=${sessionId.slice(0, 8)}, cursor=${cursor}`);
 				sharedSession = { sessionId, cursor, cwd };
 			}

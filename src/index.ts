@@ -160,6 +160,32 @@ const CC_CHILD_ENV = {
 	DISABLE_AUTO_COMPACT: "1",
 } as const;
 
+/** Ceiling for one bridged tool result, in tokens.
+ *
+ *  Claude Code caps every MCP tool result at `MAX_MCP_OUTPUT_TOKENS` — its own
+ *  default is 25,000 tokens (a 100,000-character budget; an image counts 1,600)
+ *  — cuts anything longer and appends a notice telling the model to reach for
+ *  the server's pagination tools. The bridge serves pi's OWN tools over MCP, so
+ *  that cap lands on host tool output which the host already bounded, and the
+ *  advice names tools no bridged server has. The result is a silent second
+ *  truncation: the model reasons over a cut file or command output, and nothing
+ *  on the pi side reports it.
+ *
+ *  125,000 tokens is a 500,000-character budget, matching the largest output cap
+ *  the host itself applies, so the host's limits are the binding ones. It is a
+ *  ceiling, not an allocation — a result only gets this big if a host tool chose
+ *  to emit it.
+ */
+const DEFAULT_MAX_MCP_OUTPUT_TOKENS = 125_000;
+
+/** The environment for one Claude Code subprocess: the guards above, plus the
+ *  result ceiling, which is per-user and so cannot live in the constant. */
+function ccChildEnv(cwd: string): NodeJS.ProcessEnv {
+	const configured = loadConfig(cwd).provider?.maxMcpOutputTokens;
+	const maxMcpOutputTokens = typeof configured === "number" && configured > 0 ? configured : DEFAULT_MAX_MCP_OUTPUT_TOKENS;
+	return { ...process.env, ...CC_CHILD_ENV, MAX_MCP_OUTPUT_TOKENS: String(maxMcpOutputTokens) };
+}
+
 // Pi owns context files on the provider path, so Claude Code must not load its
 // own on top: otherwise a project CLAUDE.md arrives twice, and the user's
 // ~/.claude/CLAUDE.md — a persona written for a harness that is not the one
@@ -643,7 +669,7 @@ async function runIsolatedSummaryQuery(
 			prompt: promptText,
 			options: {
 				cwd,
-				env: { ...process.env, ...CC_CHILD_ENV },
+				env: ccChildEnv(cwd),
 				settings: { autoMemoryEnabled: false },
 				tools: [],
 				strictMcpConfig: true,
@@ -918,6 +944,8 @@ export const __test = {
 	deliverToolResults,
 	drainForAbort,
 	CC_CHILD_ENV,
+	ccChildEnv,
+	DEFAULT_MAX_MCP_OUTPUT_TOKENS,
 	buildMcpServers,
 	branchSummaryOutcome,
 	callHostCompact,
@@ -1920,7 +1948,7 @@ function streamClaudeAgentSdk(model: Model<any>, context: Context, options?: Sim
 	// also autocompact would double-flush the prompt cache and races pi's
 	// threshold with CC's, including CC's anti-thrashing guard (issue #8).
 	// Manual /compact in CC still works (we never invoke it).
-	const childEnv = { ...process.env, ...CC_CHILD_ENV };
+	const childEnv = ccChildEnv(cwd);
 	const queryOptions: NonNullable<Parameters<typeof query>[0]["options"]> = {
 		cwd,
 		env: childEnv,
@@ -2161,7 +2189,7 @@ async function promptAndWait(
 		prompt,
 		options: {
 			cwd,
-			env: { ...process.env, ...CC_CHILD_ENV },
+			env: ccChildEnv(cwd),
 			permissionMode: "bypassPermissions",
 			settings: { ...claudeCodeSettings(providerSettings), claudeMdExcludes: CLAUDE_MD_EXCLUDES },
 			skills: [],

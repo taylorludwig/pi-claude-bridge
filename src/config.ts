@@ -38,6 +38,13 @@ export interface Config {
 		// does not actually serve; pins them to the bare id at 200K.
 		forceTwoHundredK?: string[];
 		settingSources?: ClaudeSettingSource[];
+		// Ceiling for one bridged tool result, in tokens. Claude Code caps every
+		// MCP tool result at MAX_MCP_OUTPUT_TOKENS (its default is 25,000) and
+		// silently cuts anything longer. The bridge serves pi's own tools over
+		// MCP, so that cap truncates host tool output a second time, after the
+		// host already applied its own limits. Raised so the host's limits are
+		// the binding ones; set it lower to hand the cap back to Claude Code.
+		maxMcpOutputTokens?: number;
 	};
 	/** The plan-usage readout published to the host status line. */
 	statusUsage?: {

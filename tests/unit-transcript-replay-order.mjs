@@ -13,6 +13,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
 import { __test } from "../src/index.js";
+import { vendoredReplay } from "../src/transcript.js";
 
 const { toBridgeContext } = __test;
 
@@ -111,5 +112,19 @@ describe("toBridgeContext section replay order", () => {
 	it("returns a context without system messages unchanged (systemless call shape)", () => {
 		const context = { messages: [userMessage("go")], systemPrompt: "P", tools: [] };
 		assert.equal(toBridgeContext(context), context, "same object reference — a true no-op");
+	});
+
+	// OMP's pi-ai ships none of the replay helpers, so on that host every one of the
+	// cases above runs through the vendored fold instead — a path this suite would
+	// otherwise never execute, because it resolves the real pi-ai. The two have to
+	// agree: the rendered prompt is looked up by exact key against what the host
+	// recorded, so a divergence throws on a legitimate turn rather than degrading.
+	it("renders identically whether the host supplies the replay helpers or not", () => {
+		for (const messages of [SKILLS_REORDERED, UNKNOWN_SECTION_CANONICAL]) {
+			const viaHost = toBridgeContext({ messages, tools: undefined, systemPrompt: undefined });
+			const viaVendored = vendoredReplay(messages);
+			assert.equal(viaVendored.systemPrompt, viaHost.systemPrompt);
+			assert.deepEqual(viaVendored.tools, viaHost.tools);
+		}
 	});
 });
